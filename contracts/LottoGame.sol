@@ -2,52 +2,203 @@
 pragma solidity ^0.8.0;
 
 import '@openzeppelin/contracts/access/AccessControl.sol';
-import '@openzeppelin/contracts/token/ERC20/IERC20.sol';
-import '@openzeppelin/contracts/token/ERC20/ERC20.sol';
-import 'abdk-libraries-solidity/ABDKMathQuad.sol';
+import '@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol';
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+
+import './LottoGame.sol';
 import './LottoToken.sol';
 import './Oracle.sol';
 
 contract LottoGame is AccessControl {
+  using SafeMath for uint256;
 
-  // Is game running?
-  bool public gameState;
+  /**
+   * @dev Game record struct
+   */
+  struct Game {
 
-  // Increments with each `_randModulus()` call, for randomness 
-  uint nonce;
+    /**
+     * @dev Is game running?
+     */
+    bool status;
 
-  // Number of completed games
-  uint public gameCount;
+    /**
+     * @dev Number assigned to the game (sequental, based on total games)
+     */
+    uint256 number;
 
-  uint public gamePlayerCount;
-  uint public gameMaxPlayers;
-  uint public gameMaxTicketsPlayer;
-  uint public gameTicketPrice;
+    /**
+     * @dev Total value of token pot
+     */
+    uint256 pot;
 
-  // Percentage of the pot will go to `gameFeeAddress`
-  uint public gameFeePercent = 1;
-  address private gameFeeAddress;
+    /**
+     * @dev Number of players in the current game
+     */
+    uint256 playerCount;
 
-  address public gameLastWinner;
-  address public gameTokenAddress;
-  address[] public gameTickets;
-  address[] public gamePlayersIndex;
-  
-  mapping(address => uint) public gamePlayers;
+    /**
+     * @dev Number of all player tickets in the current game
+     */
+    uint256 ticketCount;
 
-  // The game token that players will play for.
-  ERC20 gameToken;
-  
-  // Randomness oracle, for selecting a winner on `endGame()`
+    /**
+     * @dev Maximum number of players allowed in the game
+     */
+    uint256 maxPlayers;
+
+    /**
+     * @dev Maximum number of tickets per player
+     */
+    uint256 maxTicketsPlayer;
+
+    /**
+     * @dev Single ticket price
+     */
+    uint256 ticketPrice;
+
+    /**
+     * @dev Percentage (hundredth) of the pot will go to `gameFeeAddress`.
+     * Zero value disables feature
+     */
+    uint256 feePercent;
+
+    /**
+     * @dev Owner address of the game
+     * @todo Allow people to run their own games? Risky?, sure.
+     */
+    // address ownerAddress;
+
+    /**
+     * @dev Destination for the game fee tokens
+     */
+    address feeAddress;
+
+    /**
+     * @dev Game address for underlying functionality (raffle, lotto, ...)
+     */
+    address gameAddress;
+
+    /**
+     * @dev ERC-20 token address for game tickets
+     */
+    address tokenAddress;
+
+    /**
+     * @dev Address of the game winner
+     */
+    address winnerAddress;
+
+    /**
+     * @dev List of individual player tickets
+     */
+    address[] tickets;
+
+    /**
+     * @dev Cross reference for `Game` struct `players` mapping
+     */
+    address[] playersIndex;
+
+    /**
+     * @dev Winner result (i.e. single ticket index for raffle, or multiple numbers for lotto)
+     */
+    uint256[] winnerResult;
+
+    /**
+     * @dev List of unique game players
+     */
+    mapping (address => uint256) players;
+
+    /**
+     * @dev The game token that players will play for.
+     */
+    IERC20Metadata token;
+
+    /**
+     * @dev The game interface.
+     * @todo Modular game interface (lotto, raffle, ...)
+     */
+    // IGB game;
+  }
+
+  /**
+   * @dev Storage for all games (Game structs)
+   */
+  mapping (uint256 => Game) games;
+
+  /**
+   * @dev Increments with each `_randModulus()` call, for randomness
+   */
+  uint256 nonce;
+
+  /**
+   * @dev Total number of games (increments in `startGame`)
+   */
+  uint256 public totalGames;
+
+  /**
+   * @dev Total number of games ended (increments in `endGame`)
+   */
+  uint256 public totalGamesEnded;
+
+  /**
+   * @dev Randomness oracle, for selecting a winner on `endGame()`
+   */
   Oracle oracle;
 
-  // Roles
+  /**
+   * @dev Role for `startGame()`, `endGame()`
+   */
   bytes32 public constant CALLER_ROLE = keccak256("CALLER_ROLE");
+
+  /**
+   * @dev Role for `setGameToken()`, `setTicketPrice()`, `setMaxPlayers()`,
+   * `setMaxTicketsPerPlayer()`, `setGameFeePercent()`, `setGameFeeAddress()`
+   */
   bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
 
-  constructor(address _oracleAddress) {
+  /**
+   * @dev Emitted when a game is started
+   */
+  event GameStarted(
+    address indexed tokenAddress,
+    address indexed feeAddress,
+    uint256 indexed gameNumber,
+    uint256 feePercent,
+    uint256 ticketPrice,
+    uint256 maxPlayers,
+    uint256 maxTicketsPlayer
+  );
 
-    // Random oracle
+  /**
+   * @dev Emitted when a player buys ticket(s)
+   */
+  event TicketBought(
+    address indexed playerAddress,
+    uint256 indexed gameNumber,
+    uint256 playerCount,
+    uint256 ticketCount
+  );
+
+  /**
+   * @dev Emitted when a game ends, and a player has won
+   */
+  event GameEnded(
+    address indexed tokenAddress,
+    address indexed winnerAddress,
+    uint256 indexed gameNumber,
+    uint256[] winnerResult,
+    uint256 pot
+  );
+
+  /**
+   * @dev Setup contract
+   */
+  constructor(
+    address _oracleAddress
+  ) {
+
+    // Oracle of randomness
     oracle = Oracle(_oracleAddress);
 
     // Grant the contract deployer the default admin role: it will be able
@@ -57,44 +208,67 @@ contract LottoGame is AccessControl {
     _setupRole(CALLER_ROLE, msg.sender);
   }
 
+  /**
+   * @dev Used by `buyTicket()`
+   */
   function _safeTransferFrom(
-    IERC20 token,
+    IERC20Metadata token,
     address sender,
     address recipient,
-    uint amount
+    uint256 amount
   ) private {
     bool sent = token.transferFrom(sender, recipient, amount);
     require(sent, "Token transfer failed");
   }
 
-  function resetGame() public onlyRole(CALLER_ROLE) {
-    _resetGame();
-  }
+  /**
+   * @dev Reset all game storage states
+   */
+  function _resetGame(
+    uint256 _gameNumber
+  ) private {
+    Game storage g = games[_gameNumber];
 
-  function _resetGame() private {
-    gameTickets = new address[](0);
-    uint _gamePlayerCount = gamePlayerCount;
-    address[] memory _gamePlayersIndex = gamePlayersIndex;
-    address j;
-    for (uint i = 0; i < _gamePlayerCount; i++) {
-      j = _gamePlayersIndex[i];
-      delete gamePlayers[j];
-    }
-    gamePlayersIndex = new address[](0);
-  }
-
-  function startGame(
-    address _token,
-    address _gameFeeAddress,
-    uint _gameFeePercent,
-    uint _ticketPrice,
-    uint _maxPlayers,
-    uint _maxTicketsPlayer
-  ) public onlyRole(CALLER_ROLE) {
     require(
-      gameState == false,
-      "Game already started"
+      g.maxPlayers > 0,
+      "Invalid game"
     );
+    require(
+      g.status == true,
+      "Game already ended"
+    );
+
+    g.tickets = new address[](0);
+    address j;
+    for (uint256 i = 0; i < g.playerCount; i++) {
+      j = g.playersIndex[i];
+      delete g.players[j];
+    }
+    g.playersIndex = new address[](0);
+    g.playerCount = 0;
+    g.ticketCount = 0;
+  }
+
+  /**
+   * @dev Game reset call for managers
+   */
+  function resetGame(
+    uint256 _gameNumber
+  ) external onlyRole(MANAGER_ROLE) {
+    _resetGame(_gameNumber);
+  }
+
+  /**
+   * @dev Start a new game (if none running) with given parameters
+   */
+  function startGame(
+    address _gameTokenAddress,
+    address _gameFeeAddress,
+    uint256 _gameFeePercent,
+    uint256 _ticketPrice,
+    uint256 _maxPlayers,
+    uint256 _maxTicketsPlayer
+  ) external onlyRole(CALLER_ROLE) {
     require(
       _ticketPrice > 0,
       "Price greater than 0"
@@ -107,238 +281,418 @@ contract LottoGame is AccessControl {
       _maxTicketsPlayer > 0,
       "Max tickets greater than 0"
     );
-    
-    gameState = true;
-    gamePlayerCount = 0;
 
-    gameTokenAddress = _token;
-    gameToken = ERC20(gameTokenAddress);
+    // Get game number
+    uint256 _gameNumber = totalGames++;
 
-    gameFeeAddress = _gameFeeAddress;
-    gameFeePercent = _gameFeePercent;
+    // Create new game record
+    Game storage g = games[_gameNumber];
+    g.status = true;
+    g.number = _gameNumber;
+    g.playerCount = 0;
+    g.ticketCount = 0;
+    g.maxPlayers = _maxPlayers;
+    g.maxTicketsPlayer = _maxTicketsPlayer;
+    g.ticketPrice = _ticketPrice;
+    g.feePercent = _gameFeePercent;
+    g.feeAddress = _gameFeeAddress;
+    g.tokenAddress = _gameTokenAddress;
+    g.token = IERC20Metadata(_gameTokenAddress);
 
-    gameTicketPrice = _ticketPrice;
-    gameMaxPlayers = _maxPlayers;
-    gameMaxTicketsPlayer = _maxTicketsPlayer;
+    // Fire `GameStarted` event
+    emit GameStarted(
+      g.tokenAddress,
+      g.feeAddress,
+      g.number,
+      g.feePercent,
+      g.ticketPrice,
+      g.maxPlayers,
+      g.maxTicketsPlayer
+    );
   }
 
-  function buyTicket(uint _numberOfTickets) public {
+  /**
+   * @dev Allow a player to buy Nth tickets in `_gameNumber`, at predefined `g.ticketPrice` of `g.token`
+   */
+  function buyTicket(
+    uint256 _gameNumber,
+    uint256 _numberOfTickets
+  ) external {
+    Game storage g = games[_gameNumber];
+
     require(
-      gameState == true,
-      "Game not started"
+      g.maxPlayers >= 0,
+      "Invalid game"
+    );
+    require(
+      g.status == true,
+      "Game already ended"
     );
     require(
       _numberOfTickets > 0,
       "Buy at least 1 ticket"
     );
 
-    uint _totalPrice = ABDKMathQuad.toUInt(
-      ABDKMathQuad.mul(
-        ABDKMathQuad.fromUInt(gameTicketPrice),
-        ABDKMathQuad.fromUInt(_numberOfTickets)
-      )
-    );
+    // Ensure player has enough tokens to play
+    uint256 _totalCost = g.ticketPrice.mul(_numberOfTickets);
     require(
-      gameToken.allowance(msg.sender, address(this)) >= _totalPrice,
+      g.token.allowance(msg.sender, address(this)) >= _totalCost,
       "Insufficent game token allowance"
     );
 
+    // Marker for new player logic
     bool _isNewPlayer = false;
-    uint _playerTicketCount = gamePlayers[msg.sender];
+
+    // Current number of tickets that this player has
+    uint256 _playerTicketCount = g.players[msg.sender];
 
     // First time player has entered the game
     if (_playerTicketCount == 0) {
-      if (gamePlayerCount == gameMaxPlayers) {
+      if (g.playerCount == g.maxPlayers) {
         revert("Too many players in game");
       }
       _isNewPlayer = true;
     }
     
     // Check the new player ticket count
-    uint _playerTicketNextCount = _playerTicketCount + _numberOfTickets;
+    uint256 _playerTicketNextCount = _playerTicketCount + _numberOfTickets;
     require(
-      _playerTicketNextCount <= gameMaxTicketsPlayer,
+      _playerTicketNextCount <= g.maxTicketsPlayer,
       "Exceeds max player tickets, try lower value"
     );
 
-    // Transfer `_totalPrice` of `gameToken` from player, this this contract
-    _safeTransferFrom(gameToken, msg.sender, address(this), _totalPrice);
+    // Transfer `_totalCost` of `gameToken` from player, this this contract
+    // g.token.transferFrom(msg.sender, address(this), _totalCost);
+    _safeTransferFrom(
+      g.token,
+      msg.sender,
+      address(this),
+      _totalCost
+    );
+
+    // Add total ticket cost to pot
+    g.pot += _totalCost;
 
     // If a new player (currently has no tickets)
     if (_isNewPlayer) {
-      
+
       // Increase game total player count
-      gamePlayerCount++;
+      g.playerCount++;
 
       // Used for iteration on game player mapping, when resetting game
-      gamePlayersIndex.push(msg.sender);
+      g.playersIndex.push(msg.sender);
     }
 
     // Update number of tickets purchased by player
-    gamePlayers[msg.sender] = _playerTicketNextCount;
+    g.players[msg.sender] = _playerTicketNextCount;
 
     // Add each of the tickets to an array, a random index of this array 
     // will be selected as winner.
-    uint _i;
+    uint256 _i;
     while (_i != _numberOfTickets) {
-      gameTickets.push(msg.sender);
+      g.tickets.push(msg.sender);
       _i++;
     }
+
+    // Increase total number of game player tickets
+    g.ticketCount += _numberOfTickets;
+
+    // Fire `TicketBought` event
+    emit TicketBought(
+      msg.sender,
+      g.number,
+      g.playerCount,
+      g.ticketCount
+    );
   }
 
-  function endGame() public onlyRole(CALLER_ROLE) {
+  /**
+   * @dev Ends the current game, and picks a winner
+   */
+  function endGame(
+    uint256 _gameNumber
+  ) external onlyRole(CALLER_ROLE) {
+    Game storage g = games[_gameNumber];
+
     require(
-      gameState == true,
-      "Game already ended"
+      g.maxPlayers > 0,
+      "Invalid game"
     );
     require(
-      gameTickets.length > 1,
-      "Need at least two players in game"
+      g.status == true,
+      "Game already ended"
+    );
+
+    uint256 _pot = g.pot;
+    uint256 _balance = g.token.balanceOf(address(this));
+    require(
+      g.pot <= _balance,
+      "Not enough of game token in reserve"
     );
 
     // Close game
-    gameState = false;
+    g.status = false;
 
     // Pick winner
-    uint _rand = _randModulus(100);
-    uint _total = gameTickets.length - 1;
-    uint _index = _rand % _total;
-    address _gameLastWinner = gameTickets[_index];
+    uint256 _rand = _randModulus(100);
+    uint256 _total = g.ticketCount - 1;
+    uint256 _index = (_total == 0) ? 0 : (_rand % _total);
 
-    // Sort pot
-    uint _pot = gameToken.balanceOf(address(this));
+    // Store winner result index
+    g.winnerResult.push(_index);
+
+    // Store winner address index
+    g.winnerAddress = g.tickets[_index];
 
     // Send fees (if applicable)
-    if (gameFeePercent > 0) {
-      // uint _gameFeePercent = (gameFeePercent / 100);
-      // uint _feeTotal = (_gameFeePercent * _pot);
-      uint _feeTotal = ABDKMathQuad.toUInt(
-        ABDKMathQuad.mul(
-          ABDKMathQuad.div(
-            ABDKMathQuad.fromUInt(gameFeePercent),
-            ABDKMathQuad.fromUInt(100)
-          ),
-          ABDKMathQuad.fromUInt(_pot)
-        )
-      );
-      gameToken.transfer(gameFeeAddress, _feeTotal);
-      // _pot -= _feeTotal;
-      _pot = ABDKMathQuad.toUInt(
-        ABDKMathQuad.sub(
-          ABDKMathQuad.fromUInt(_pot),
-          ABDKMathQuad.fromUInt(_feeTotal)
-        )
-      );
+    if (g.feePercent > 0) {
+      uint256 _feeTotal = _pot.div(100).mul(g.feePercent);
 
-      // Recall instead?
-      // _pot = gameToken.balanceOf(address(this));
+      // Transfer game fee from pot
+      if (_feeTotal > 0) {
+        g.token.transfer(g.feeAddress, _feeTotal);
+
+        // Deduct fee from pot value
+        _pot -= _feeTotal;
+      }
     }
 
     // Send pot to winner
-    gameToken.transfer(_gameLastWinner, _pot);
+    g.token.transfer(g.winnerAddress, _pot);
 
-    // Prepare for the next game
-    _resetGame();
-    gameLastWinner = _gameLastWinner;
-    gameCount++;
+    // @todo Trim superfluous game data for gas saving
+    totalGamesEnded++;
+
+    // Fire `GameEnded` event
+    emit GameEnded(
+      g.tokenAddress,
+      g.winnerAddress,
+      g.number,
+      g.winnerResult,
+      _pot
+    );
   }
 
-  // function getPlayers() public view returns (address[] memory) {
-  //   return gamePlayers;
+  /**
+   * @dev Return an array of useful game states
+   */
+  function getGameState(
+    uint256 _gameNumber
+  ) external view
+  returns (
+    bool status,
+    uint256 pot,
+    uint256 playerCount,
+    uint256 ticketCount,
+    uint256 maxPlayers,
+    uint256 maxTicketsPlayer,
+    uint256 ticketPrice,
+    uint256 feePercent,
+    address feeAddress,
+    address tokenAddress,
+    address winnerAddress,
+    uint256[] memory winnerResult
+  ) {
+    Game storage g = games[_gameNumber];
+
+    require(
+      g.maxPlayers > 0,
+      "Invalid game"
+    );
+
+    return (
+      g.status,
+      g.pot,
+      g.playerCount,
+      g.ticketCount,
+      g.maxPlayers,
+      g.maxTicketsPlayer,
+      g.ticketPrice,
+      g.feePercent,
+      g.feeAddress,
+      g.tokenAddress,
+      g.winnerAddress,
+      g.winnerResult
+    );
+  }
+
+  /**
+   * @dev Return `totalGamesEnded`, the total number of completed games
+   */
+  // function getTotalGameCount() external view returns(uint256) {
+  //   return totalGamesEnded;
   // }
 
-  function getGameCount() public view returns(uint) {
-    return gameCount;
-  }
+  /**
+   * @dev Define new ERC20 `gameToken` with provided `_token`
+   */
+  function setGameToken(
+    uint256 _gameNumber,
+    address _token
+  ) external onlyRole(MANAGER_ROLE) returns(bool sufficient) {
+    Game storage g = games[_gameNumber];
 
-  function getGamePlayerCount() public view returns(uint) {
-    return gamePlayerCount;
-  }
+    require(
+      g.maxPlayers > 0,
+      "Invalid game"
+    );
+    require(
+      g.status == true,
+      "Game already ended"
+    );
 
-  function getGameToken() public view returns(address) {
-    return gameTokenAddress;
-  }
+    g.tokenAddress = _token;
+    g.token = IERC20Metadata(_token);
 
-  function setGameToken(address _token) public onlyRole(MANAGER_ROLE) returns(bool sufficient) {
-    gameTokenAddress = _token;
-    gameToken = ERC20(gameTokenAddress);
     return true;
   }
 
-  function getTicketPrice() public view returns(uint) {
-    return gameTicketPrice;
-  }
+  /**
+   * @dev Define new game ticket price
+   */
+  function setTicketPrice(
+    uint256 _gameNumber,
+    uint256 _price
+  ) external onlyRole(MANAGER_ROLE) returns(bool sufficient) {
+    Game storage g = games[_gameNumber];
 
-  function setTicketPrice(uint _price) public onlyRole(MANAGER_ROLE) returns(bool sufficient) {
+    require(
+      g.maxPlayers > 0,
+      "Invalid game"
+    );
+    require(
+      g.status == true,
+      "Game already ended"
+    );
     require(
       _price > 0,
       "Price greater than 0"
     );
-    gameTicketPrice = _price;
+
+    g.ticketPrice = _price;
+
     return true;
   }
 
-  function getMaxPlayers() public view returns(uint) {
-    return gameMaxPlayers;
-  }
+  /**
+   * @dev Defines maximum number of unique game players
+   */
+  function setMaxPlayers(
+    uint256 _gameNumber,
+    uint256 _max
+  ) external onlyRole(MANAGER_ROLE) returns(bool sufficient) {
+    Game storage g = games[_gameNumber];
 
-  function setMaxPlayers(uint _max) public onlyRole(MANAGER_ROLE) returns(bool sufficient) {
+    require(
+      g.maxPlayers > 0,
+      "Invalid game"
+    );
+    require(
+      g.status == true,
+      "Game already ended"
+    );
     require(
       _max > 1,
       "Max players greater than 1"
     );
-    gameMaxPlayers = _max;
+
+    g.maxPlayers = _max;
+
     return true;
   }
 
-  function getMaxTicketsPerPlayer() public view returns(uint) {
-    return gameMaxTicketsPlayer;
-  }
+  /**
+   * @dev Defines maximum number of tickets, per unique game player
+   */
+  function setMaxTicketsPerPlayer(
+    uint256 _gameNumber,
+    uint256 _max
+  ) external onlyRole(MANAGER_ROLE) returns(bool sufficient) {
+    Game storage g = games[_gameNumber];
 
-  function setMaxTicketsPerPlayer(uint _max) public onlyRole(MANAGER_ROLE) returns(bool sufficient) {
+    require(
+      g.maxPlayers > 0,
+      "Invalid game"
+    );
+    require(
+      g.status == true,
+      "Game already ended"
+    );
     require(
       _max > 0,
       "Max tickets greater than 0"
     );
-    gameMaxTicketsPlayer = _max;
+
+    g.maxTicketsPlayer = _max;
+
     return true;
   }
 
-  function getGameFeePercent() public view returns(uint) {
-    return gameFeePercent;
-  }
+  /**
+   * @dev Defines the game fee percentage (can only be lower than original value)
+   */
+  function setGameFeePercent(
+    uint256 _gameNumber,
+    uint256 _percent
+  ) external onlyRole(MANAGER_ROLE) returns(bool sufficient) {
+    Game storage g = games[_gameNumber];
 
-  function setGameFeePercent(uint _percent) public onlyRole(MANAGER_ROLE) returns(bool sufficient) {
+    require(
+      g.maxPlayers > 0,
+      "Invalid game"
+    );
+    require(
+      g.status == true,
+      "Game already ended"
+    );
     require(
       _percent >= 0,
       "Zero or higher"
     );
-    if (gameState == true) {
-      require(
-        _percent <= gameFeePercent,
-        "Can only be decreased after game start"
-      );
-    }
-    gameFeePercent = _percent;
+    require(
+      _percent < g.feePercent,
+      "Can only be decreased after game start"
+    );
+
+    g.feePercent = _percent;
+
     return true;
   }
 
-  function getGameFeeAddress() public view returns(address) {
-    return gameFeeAddress;
-  }
+  /**
+   * @dev Defines an address for the game fee
+   */
+  function setGameFeeAddress(
+    uint256 _gameNumber,
+    address _address
+  ) external onlyRole(MANAGER_ROLE) returns(bool sufficient) {
+    Game storage g = games[_gameNumber];
 
-  function setGameFeeAddress(address _address) public onlyRole(MANAGER_ROLE) returns(bool sufficient) {
-    gameFeeAddress = _address;
+    require(
+      g.maxPlayers > 0,
+      "Invalid game"
+    );
+    require(
+      g.status == true,
+      "Game already ended"
+    );
+
+    g.feeAddress = _address;
+
     return true;
   }
 
-  function _randModulus(uint mod) internal returns(uint) {
-    uint _rand = uint(
+  /**
+   * @dev Returns a random seed
+   */
+  function _randModulus(
+    uint256 mod
+  ) internal returns(uint256) {
+    uint256 _rand = uint256(
       keccak256(
         abi.encodePacked(
           nonce,
           oracle.rand(),
-          gameTickets,
           block.timestamp,
           block.difficulty,
           msg.sender
@@ -346,6 +700,7 @@ contract LottoGame is AccessControl {
       )
     ) % mod;
     nonce++;
+
     return _rand;
   }
 }

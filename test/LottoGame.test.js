@@ -20,116 +20,284 @@ contract('LottoGame', function ([ creator, other ]) {
     oracle = await Oracle.new({ from: creator });
     contract = await LottoGame.new(oracle.address, { from: creator });
     token = await LottoToken.new(creator, { from: creator });
+    decimals = web3.utils.toBN(18);
   });
 
   it('should allow accounts to buy tickets', async function () {
+    let expected, actual;
+
+    let maxPlayers = web3.utils.toBN('3');
+    let maxTicketsPlayer = web3.utils.toBN('10');
+    let gameFeePercent = web3.utils.toBN('0');
+    let ticketPrice = web3.utils.toBN('1').mul(web3.utils.toBN(10).pow(decimals));
+    let numberOfTickets = web3.utils.toBN('10');
+    let gameFeeAddress = accounts[8];
 
     // Start game for LottoToken, exactly one token per entry,
     // max three players, max one ticket per player.
-    await contract.startGame(
+    let game0 = await contract.startGame(
 
       // Token address
       token.address,
 
       // Game fee address
-      accounts[8],
+      gameFeeAddress,
 
       // Game fee percent
-      2,
+      gameFeePercent,
 
       // Ticket price
-      1000,
+      ticketPrice,
 
       // Max players
-      3,
+      maxPlayers,
 
       // Max player tickets
-      1,
+      maxTicketsPlayer,
 
       {from: accounts[0]}
     )
 
+    // console.log(game0.logs[0].args.gameNumber);
+    let game0Log = game0.logs[0].args;
+    expect(game0Log.tokenAddress).to.eql(token.address);
+    expect(game0Log.feeAddress).to.eql(gameFeeAddress);
+    expect(game0Log.gameNumber).to.be.bignumber.equal('0');
+    expect(game0Log.feePercent).to.be.bignumber.equal(gameFeePercent);
+    expect(game0Log.ticketPrice).to.be.bignumber.equal(ticketPrice);
+    expect(game0Log.maxPlayers).to.be.bignumber.equal(maxPlayers);
+    expect(game0Log.maxTicketsPlayer).to.be.bignumber.equal(maxTicketsPlayer);
+
     // Seed accounts for testing
-    // let totalSupply = await token.totalSupply({ from: accounts[0] })
-    await token.approve(accounts[0], 100000, {from: accounts[0]})
-    await token.transferFrom(accounts[0], accounts[1], 10000, { from: accounts[0] })
-    await token.transferFrom(accounts[0], accounts[2], 10000, { from: accounts[0] })
-    await token.transferFrom(accounts[0], accounts[3], 10000, { from: accounts[0] })
-    await token.transferFrom(accounts[0], accounts[4], 10000, { from: accounts[0] })
+    await token.approve(
+      accounts[0],
+      web3.utils.toBN(1000000).mul(web3.utils.toBN(10).pow(decimals)),
+      {from: accounts[0]}
+    )
+
+    let approveAmount = web3.utils.toBN(10000).mul(web3.utils.toBN(10).pow(decimals));
+    // await token.transferFrom(accounts[0], accounts[1], approveAmount, { from: accounts[0] })
+    await token.transferFrom(accounts[0], accounts[1], approveAmount, { from: accounts[0] })
+    await token.transferFrom(accounts[0], accounts[2], approveAmount, { from: accounts[0] })
+    await token.transferFrom(accounts[0], accounts[3], approveAmount, { from: accounts[0] })
+    await token.transferFrom(accounts[0], accounts[4], approveAmount, { from: accounts[0] })
+
+    let approveAmount100K = web3.utils.toBN(100000).mul(web3.utils.toBN(10).pow(decimals));
+    await token.approve(contract.address, approveAmount100K, {from: accounts[0]});
+    await token.approve(contract.address, approveAmount100K, {from: accounts[1]});
+    await token.approve(contract.address, approveAmount100K, {from: accounts[2]});
+    await token.approve(contract.address, approveAmount100K, {from: accounts[3]});
+    await token.approve(contract.address, approveAmount100K, {from: accounts[4]});
 
     // Approve and buy 1 ticket for A1
-    await token.approve(contract.address, 5000, {from: accounts[1]});
-    await contract.buyTicket(1, {from: accounts[1]})
-    let count = await contract.getGamePlayerCount({from: accounts[1]});
-    // console.log(count);
-    // expect(count).to.be.bignumber;
-    // assert(count === 1, 'Number of players 1');
+    let game0A1Ticket = await contract.buyTicket(
+      
+      // Game number
+      game0Log.gameNumber,
+      
+      // Number of tickets
+      numberOfTickets,
+      
+      {from: accounts[1]}
+    )
 
+    let game0A1TicketLog = game0A1Ticket.logs[0].args;
+    expect(game0A1TicketLog.playerAddress).to.be.bignumber.equal(accounts[1]);
+    expect(game0A1TicketLog.gameNumber).to.be.bignumber.equal('0');
+    expect(game0A1TicketLog.playerCount).to.be.bignumber.equal('1');
+    expect(game0A1TicketLog.ticketCount).to.be.bignumber.equal(numberOfTickets);
+
+    // Check contract balance (pot)
+    let contractBalance = await token.balanceOf.call(contract.address, {from: accounts[1]});
+    // console.log(contractBalance.toString());
+
+    expect(contractBalance).to.eql(web3.utils.toBN('10').mul(web3.utils.toBN(10).pow(decimals)));
+
+    // Number of game players increases by one
+    expected = web3.utils.toBN('1');
+    actual = await contract.totalGames({from: accounts[1]});
+    expect(actual).to.be.bignumber.equal(expected);
+
+    // Buy second ticket for A1 (should fail)
+    try {
+      await contract.buyTicket(
+      
+        // Game number
+        game0Log.gameNumber,
+        
+        // Number of tickets
+        numberOfTickets,
+        
+        {from: accounts[1]}
+      );
+      assert.fail('The transaction should have thrown an error');
+    } catch (err) {
+      assert.include(
+        err.message,
+        "Exceeds max player tickets, try lower value",
+        "The error message should contain 'Exceeds max player tickets, try lower value'"
+      );
+    }
+    
     // Approve and buy 1 ticket for A2
-    await token.approve(contract.address, 5000, {from: accounts[2]});
-    await contract.buyTicket(1, {from: accounts[2]})
-    let count2 = await contract.getGamePlayerCount({from: accounts[2]});
-    // expect(count2).to.be.bignumber;
-    // assert(count2 === 2, 'Number of players 2');
+    await contract.buyTicket(
+      
+      // Game number
+      game0Log.gameNumber,
+      
+      // Number of tickets
+      numberOfTickets,
+      
+      {from: accounts[2]}
+    )
 
     // Approve and buy 1 ticket for A3
-    await token.approve(contract.address, 5000, {from: accounts[3]});
-    await contract.buyTicket(1, {from: accounts[3]})
-    let count3 = await contract.getGamePlayerCount({from: accounts[3]});
-    // expect(count3).to.be.bignumber;
-    // assert(count3 === 3, 'Number of players 3');
+    await contract.buyTicket(
+      
+      // Game number
+      game0Log.gameNumber,
+      
+      // Number of tickets
+      numberOfTickets,
+      
+      {from: accounts[3]}
+    )
+    
+    // Buy 1 ticket for A4 (should fail)
+    try {
+      await contract.buyTicket(
+      
+        // Game number
+        game0Log.gameNumber,
+        
+        // Number of tickets
+        numberOfTickets,
+        
+        {from: accounts[4]}
+      );
+      assert.fail('The transaction should have thrown an error');
+    } catch (err) {
+      assert.include(
+        err.message,
+        "Too many players in game",
+        "The error message should contain 'Too many players in game'"
+      );
+    }
 
-    // Approve and buy 1 ticket for A4 (should fail)
-    // await token.approve(contract.address, 100, {from: accounts[4]});
-    // await contract.buyTicket(1, {from: accounts[4]})
-    // let count4 = await contract.getGamePlayerCount({from: accounts[4]});
+
 
     // Choose a random winner
-    // let winner = await contract.pickWinner.call({from: accounts[0]});
-    // console.log(winner);
-    await contract.endGame({from: accounts[0]});
+    let game0EndGame = await contract.endGame(
+      
+      game0Log.gameNumber,
+      
+      {from: accounts[0]}
+    );
 
-    let fees = await token.balanceOf.call(accounts[8], {from: accounts[0]});
-    // let fees = await token.balanceOf(accounts[8], {from: accounts[0]});
-    console.log(fees);
+    let game0EndGameLog = game0EndGame.logs[0].args;
+    expect(game0EndGameLog.tokenAddress).to.be.bignumber.equal(token.address);
+    // expect(game0EndGameLog.winnerAddress).to.eql(accounts[1]);
+    expect(game0EndGameLog.gameNumber).to.be.bignumber.equal('0');
+    expect(game0EndGameLog.pot).to.be.bignumber.equal(web3.utils.toBN((ticketPrice * numberOfTickets) * 3));
+
+
+
+    // Check game zero states
+    game0State = await contract.getGameState.call(
+      game0EndGameLog.gameNumber,
+      {from: accounts[1]}
+    );
+
+    expect(game0State.status).to.eql(false);
+    // Needs fee offset calc
+    // expect(game0State.pot).to.be.bignumber.equal(game0EndGameLog.pot);
+    expect(game0State.playerCount).to.be.bignumber.equal(web3.utils.toBN('3'));
+    // Each player bought one ticket each
+    expect(game0State.ticketCount).to.be.bignumber.equal(web3.utils.toBN('30'));
+    expect(game0State.maxPlayers).to.be.bignumber.equal(maxPlayers);
+    expect(game0State.maxTicketsPlayer).to.be.bignumber.equal(maxTicketsPlayer);
+    expect(game0State.ticketPrice).to.be.bignumber.equal(ticketPrice);
+    expect(game0State.feeAddress).to.be.bignumber.equal(gameFeeAddress);
+    expect(game0State.tokenAddress).to.be.bignumber.equal(token.address);
+
+
+    maxPlayers = web3.utils.toBN('3');
+    maxTicketsPlayer = web3.utils.toBN('2');
+    gameFeePercent = web3.utils.toBN('3'); // 1%
+    ticketPrice = web3.utils.toBN('1').mul(web3.utils.toBN(10).pow(decimals));
+    numberOfTickets = web3.utils.toBN('1');
+    gameFeeAddress = accounts[5];
 
     // Start game for LottoToken, exactly two token per entry,
     // max three players, max two tickets per player.
-    await contract.startGame(
+    let game1StartGame = await contract.startGame(
 
       // Token address
       token.address,
 
       // Game fee address
-      accounts[9],
+      gameFeeAddress,
 
       // Game fee percent
-      5,
+      gameFeePercent,
 
       // Ticket price
-      2000,
+      ticketPrice,
       
       // Max players
-      3,
+      maxPlayers,
 
       // Max player tickets
-      2,
+      maxTicketsPlayer,
 
       {from: accounts[0]}
-    )
+    );
+
+    let game1StartGameLog = game1StartGame.logs[0].args;
 
     // Another game test run, buying two tickets each
-    count = await contract.buyTicket(2, {from: accounts[1]});
-    count2 = await contract.buyTicket(2, {from: accounts[2]});
-    count3 = await contract.buyTicket(2, {from: accounts[3]});
-    // winner = await contract.pickWinner.call({from: accounts[0]});
-    // console.log(winner);
+    count = await contract.buyTicket(
+      
+      // Game number
+      game1StartGameLog.gameNumber,
+      
+      // Number of tickets
+      numberOfTickets,
+      
+      {from: accounts[1]}
+    );
+    count2 = await contract.buyTicket(
+      
+      // Game number
+      game1StartGameLog.gameNumber,
+      
+      // Number of tickets
+      numberOfTickets,
+      
+      {from: accounts[2]}
+    );
+    count3 = await contract.buyTicket(
+      
+      // Game number
+      game1StartGameLog.gameNumber,
+      
+      // Number of tickets
+      numberOfTickets,
+      
+      {from: accounts[3]}
+    );
 
-    // Set destination for the game fee.
-    // await contract.setGameFeePercent(1, {from: accounts[0]})
-    // await contract.setGameFeeAddress(accounts[9], {from: accounts[0]})
+    contractBalance = await token.balanceOf.call(accounts[1], {from: accounts[1]});
+    await contract.endGame(
+      game1StartGameLog.gameNumber,
+      {from: accounts[0]}
+    );
 
-    await contract.endGame({from: accounts[0]});
-  
+    contractBalance = await token.balanceOf.call(accounts[1], {from: accounts[1]});
+
+
+    contractBalance = await token.balanceOf.call(gameFeeAddress, {from: accounts[2]});
+    expect(contractBalance).to.eql(web3.utils.toBN('90000000000000000'));
+    
   });
 });
