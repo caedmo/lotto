@@ -1,11 +1,11 @@
 const Oracle = artifacts.require("Oracle");
-const LottoGame = artifacts.require("LottoGame");
-const LottoToken = artifacts.require("LottoToken");
+const GameMaster = artifacts.require("GameMaster");
+const GameBobToken = artifacts.require("GameBobToken");
 
-module.exports = function (deployer) {
+module.exports = function (deployer, network, accounts) {
   deployer.deploy(Oracle).then(x => {
-    deployer.deploy(LottoGame, x.address).then(y => {
-      deployer.deploy(LottoToken, y.address)
+    return deployer.deploy(GameMaster, x.address).then(y => {
+      return deployer.deploy(GameBobToken, accounts[0]) //y.address
     });
   });
 };
